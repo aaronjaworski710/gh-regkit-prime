@@ -228,14 +228,34 @@ def _mask_value(key: str, value: Any) -> Any:
 
 
 def _public_config() -> Dict[str, Any]:
-    cfg = load_config(ROOT / "config.json")
+    cfg_path = ROOT / "config.json"
+    configured = True
+    try:
+        cfg = load_config(cfg_path)
+    except FileNotFoundError:
+        # Fresh clone: serve the example config so the dashboard works out of
+        # the box; the UI shows "configured: false" and points to config.json.
+        cfg = load_config(ROOT / "config.example.json")
+        configured = False
     masked = {k: _mask_value(k, v) for k, v in asdict(cfg).items()}
+    masked["configured"] = configured
     for key in SECRET_FIELDS:
         raw = getattr(cfg, key, "")
         masked[f"has_{key}"] = bool(str(raw or "").strip())
     pf = (getattr(cfg, "proxy_file", "") or "").strip()
     masked["proxy_file_count"] = len(load_proxy_pool(pf)) if pf else 0
     return masked
+
+
+def _load_cfg_or_400() -> Config:
+    """load_config with a clean 400 instead of a 500 on a fresh clone."""
+    try:
+        return load_config(ROOT / "config.json")
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=400,
+            detail="config.json not found — copy config.example.json to config.json and fill it in (or save via PUT /api/config)",
+        )
 
 
 def _safe_compare(a: str, b: str) -> bool:
@@ -488,7 +508,7 @@ async def api_get_config(x_access_key: Optional[str] = Header(None)) -> Dict[str
 @app.put("/api/config")
 async def api_put_config(body: ConfigBody, x_access_key: Optional[str] = Header(None)) -> Dict[str, Any]:
     _require_auth(x_access_key)
-    cfg = load_config(ROOT / "config.json")
+    cfg = _load_cfg_or_400()
     updates = body.model_dump(exclude_unset=True)
     for key, value in updates.items():
         if key in SECRET_FIELDS and isinstance(value, str):
@@ -514,7 +534,7 @@ async def api_mailcx_domains(
 ) -> Dict[str, Any]:
     """Return the list of available mail.cx domains."""
     _require_auth(x_access_key)
-    cfg = load_config(ROOT / "config.json")
+    cfg = _load_cfg_or_400()
     domain = body.mailcx_domain or cfg.mailcx_domain or ""
     try:
         client = MailCxClient(domain=domain)
@@ -540,7 +560,7 @@ async def api_litensi_zones(
 ) -> Dict[str, Any]:
     """Return Litensi zones (prices + stock) for the configured site."""
     _require_auth(x_access_key)
-    cfg = load_config(ROOT / "config.json")
+    cfg = _load_cfg_or_400()
     api_id = body.litensi_api_id or cfg.litensi_api_id or ""
     api_key = body.litensi_api_key or ""
     if "*" in api_key:  # masked placeholder from GET — fall back to stored key
@@ -595,7 +615,7 @@ async def api_proxy_upload(
         )
     pool_name = "proxies.txt"
     (ROOT / pool_name).write_text("\n".join(valid) + "\n", encoding="utf-8")
-    cfg = load_config(ROOT / "config.json")
+    cfg = _load_cfg_or_400()
     cfg.proxy_file = pool_name
     _save_config(cfg)
     _append_log(f"[*] proxy pool uploaded: {len(valid)} proxies -> {pool_name}")
