@@ -311,9 +311,24 @@ class ProxyPool:
                     commented += n_here
                     hit_file = fpath.name
             if commented:
+                # FIX: also drop from the in-memory pool — previously the file
+                # line was commented but _entries kept serving the dead proxy
+                # for the whole process lifetime (runner saw "None remaining").
+                try:
+                    with self._lock:
+                        self._entries = [
+                            e for e in self._entries
+                            if e.raw.strip() not in variants
+                            and e.display not in variants
+                            and f"{e.host}:{e.port}" not in variants
+                        ]
+                        if self._index >= len(self._entries):
+                            self._index = 0
+                except Exception as mem_exc:
+                    log.error(f"memory pool removal failed: {mem_exc}")
                 safe = re.sub(r"://[^@/]+@", "://***@", url)
                 log.warning(f"PERMANENTLY DISABLED (exact URL): {safe} ({commented} line in {hit_file})")
-                return {"ok": True, "disabled": safe, "commented_lines": commented, "file": hit_file}
+                return {"ok": True, "disabled": safe, "commented_lines": commented, "file": hit_file, "remaining": len(self._entries)}
             safe = re.sub(r"://[^@/]+@", "://***@", url)
             return {"ok": False, "error": f"url not found in pool: {safe}"}
         except Exception as exc:
